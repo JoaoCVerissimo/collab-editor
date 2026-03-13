@@ -1,0 +1,37 @@
+{
+  "name": "@collab-editor/frontend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --port 3000",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "^14.2.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "yjs": "^13.6.0",
+    "y-websocket": "^2.0.0",
+    "y-indexeddb": "^9.0.0",
+    "y-prosemirror": "^1.2.0",
+    "@tiptap/react": "^2.3.0",
+    "@tiptap/starter-kit": "^2.3.0",
+    "@tiptap/extension-collaboration": "^2.3.0",
+    "@tiptap/extension-collaboration-cursor": "^2.3.0",
+    "@tiptap/extension-placeholder": "^2.3.0",
+    "@tiptap/extension-highlight": "^2.3.0",
+    "@tiptap/pm": "^2.3.0",
+    "@collab-editor/shared": "1.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.11.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "eslint": "^8.57.0",
+    "eslint-config-next": "^14.2.0"
+  }
+}

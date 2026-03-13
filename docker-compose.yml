@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-collab}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-collab_editor}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-collab}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: packages/backend/Dockerfile
+    ports:
+      - "4000:4000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-collab}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-collab_editor}
+      JWT_SECRET: ${JWT_SECRET}
+      COLLAB_SERVER_URL: http://collaboration:1234
+      API_PORT: "4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  collaboration:
+    build:
+      context: .
+      dockerfile: packages/collaboration/Dockerfile
+    ports:
+      - "1234:1234"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-collab}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-collab_editor}
+      JWT_SECRET: ${JWT_SECRET}
+      COLLAB_PORT: "1234"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      dockerfile: packages/frontend/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+      NEXT_PUBLIC_COLLAB_WS_URL: ${NEXT_PUBLIC_COLLAB_WS_URL:-ws://localhost:1234}
+    depends_on:
+      - backend
+      - collaboration
+
+volumes:
+  pgdata:
