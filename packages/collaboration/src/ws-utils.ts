@@ -25,38 +25,52 @@ interface WSSharedDoc extends Y.Doc {
 }
 
 const docs = new Map<string, WSSharedDoc>();
+const pendingDocs = new Map<string, Promise<WSSharedDoc>>();
 
-function getYDoc(docName: string, persistence?: Persistence): WSSharedDoc {
+function getYDoc(docName: string, persistence?: Persistence): Promise<WSSharedDoc> {
   const existing = docs.get(docName);
-  if (existing) return existing;
+  if (existing) return Promise.resolve(existing);
 
-  const doc = new Y.Doc() as WSSharedDoc;
-  doc.name = docName;
-  doc.conns = new Map();
-  doc.awareness = new awarenessProtocol.Awareness(doc);
-  doc.awareness.setLocalState(null);
+  // Deduplicate concurrent calls for the same doc
+  const pending = pendingDocs.get(docName);
+  if (pending) return pending;
 
-  doc.awareness.on('update', ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }) => {
-    const changedClients = added.concat(updated, removed);
-    const encoder = encoding.createEncoder();
-    encoding.writeVarUint(encoder, MESSAGE_AWARENESS);
-    encoding.writeVarUint8Array(encoder, awarenessProtocol.encodeAwarenessUpdate(doc.awareness, changedClients));
-    const message = encoding.toUint8Array(encoder);
-    doc.conns.forEach((_controlledIds, conn) => {
-      if (conn.readyState === WebSocket.OPEN) {
-        conn.send(message);
+  const promise = (async () => {
+    const doc = new Y.Doc() as WSSharedDoc;
+    doc.name = docName;
+    doc.conns = new Map();
+    doc.awareness = new awarenessProtocol.Awareness(doc);
+    doc.awareness.setLocalState(null);
+
+    doc.awareness.on('update', ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }) => {
+      const changedClients = added.concat(updated, removed);
+      const encoder = encoding.createEncoder();
+      encoding.writeVarUint(encoder, MESSAGE_AWARENESS);
+      encoding.writeVarUint8Array(encoder, awarenessProtocol.encodeAwarenessUpdate(doc.awareness, changedClients));
+      const message = encoding.toUint8Array(encoder);
+      doc.conns.forEach((_controlledIds, conn) => {
+        if (conn.readyState === WebSocket.OPEN) {
+          conn.send(message);
+        }
+      });
+    });
+
+    // Load persisted state BEFORE making the doc available
+    if (persistence) {
+      try {
+        await persistence.bindState(docName, doc);
+      } catch (err) {
+        console.error(`Failed to bind state for ${docName}:`, err);
       }
-    });
-  });
+    }
 
-  if (persistence) {
-    persistence.bindState(docName, doc).catch((err) => {
-      console.error(`Failed to bind state for ${docName}:`, err);
-    });
-  }
+    docs.set(docName, doc);
+    pendingDocs.delete(docName);
+    return doc;
+  })();
 
-  docs.set(docName, doc);
-  return doc;
+  pendingDocs.set(docName, promise);
+  return promise;
 }
 
 function messageListener(conn: WebSocket, doc: WSSharedDoc, message: Uint8Array): void {
@@ -100,42 +114,89 @@ interface SetupOptions {
   persistence?: Persistence;
 }
 
+export async function persistDoc(docName: string, persistence: Persistence): Promise<boolean> {
+  const doc = docs.get(docName);
+  if (!doc) return false;
+  await persistence.writeState(docName, doc);
+  return true;
+}
+
+export function evictDoc(docName: string): boolean {
+  const doc = docs.get(docName);
+  if (!doc) return false;
+  docs.delete(docName);
+  // Collect connections, then clear the map BEFORE closing.
+  // This prevents the close handler from persisting stale state.
+  const conns = Array.from(doc.conns.keys());
+  doc.conns.clear();
+  for (const conn of conns) {
+    conn.close();
+  }
+  doc.destroy();
+  return true;
+}
+
 export function setupWSConnection(conn: WebSocket, _req: IncomingMessage, opts: SetupOptions): void {
   const { docName, persistence } = opts;
-  const doc = getYDoc(docName, persistence);
 
   conn.binaryType = 'arraybuffer';
-  doc.conns.set(conn, new Set());
+
+  // Buffer messages until doc is ready
+  const pendingMessages: Uint8Array[] = [];
+  let doc: WSSharedDoc | null = null;
 
   conn.on('message', (rawMessage: ArrayBuffer | Buffer) => {
     const message = new Uint8Array(rawMessage instanceof ArrayBuffer ? rawMessage : rawMessage.buffer);
-    messageListener(conn, doc, message);
-  });
-
-  conn.on('close', () => {
-    closeConn(doc, conn);
-    if (persistence && doc.conns.size === 0) {
-      persistence.writeState(docName, doc).catch((err) => {
-        console.error(`Failed to write state for ${docName}:`, err);
-      });
+    if (doc) {
+      messageListener(conn, doc, message);
+    } else {
+      pendingMessages.push(message);
     }
   });
 
-  // Send initial sync step 1
-  const encoder = encoding.createEncoder();
-  encoding.writeVarUint(encoder, MESSAGE_SYNC);
-  syncProtocol.writeSyncStep1(encoder, doc);
-  conn.send(encoding.toUint8Array(encoder));
+  conn.on('close', () => {
+    if (doc) {
+      closeConn(doc, conn);
+      if (persistence && doc.conns.size === 0) {
+        persistence.writeState(docName, doc).catch((err) => {
+          console.error(`Failed to write state for ${docName}:`, err);
+        });
+      }
+    }
+  });
 
-  // Send awareness states
-  const awarenessStates = doc.awareness.getStates();
-  if (awarenessStates.size > 0) {
-    const awarenessEncoder = encoding.createEncoder();
-    encoding.writeVarUint(awarenessEncoder, MESSAGE_AWARENESS);
-    encoding.writeVarUint8Array(
-      awarenessEncoder,
-      awarenessProtocol.encodeAwarenessUpdate(doc.awareness, Array.from(awarenessStates.keys()))
-    );
-    conn.send(encoding.toUint8Array(awarenessEncoder));
-  }
+  // Load doc (with persistence) then initialize sync
+  getYDoc(docName, persistence).then((resolvedDoc) => {
+    doc = resolvedDoc;
+    doc.conns.set(conn, new Set());
+
+    // Process any messages received while loading
+    for (const msg of pendingMessages) {
+      messageListener(conn, doc, msg);
+    }
+    pendingMessages.length = 0;
+
+    if (conn.readyState !== WebSocket.OPEN) return;
+
+    // Send initial sync step 1
+    const encoder = encoding.createEncoder();
+    encoding.writeVarUint(encoder, MESSAGE_SYNC);
+    syncProtocol.writeSyncStep1(encoder, doc);
+    conn.send(encoding.toUint8Array(encoder));
+
+    // Send awareness states
+    const awarenessStates = doc.awareness.getStates();
+    if (awarenessStates.size > 0) {
+      const awarenessEncoder = encoding.createEncoder();
+      encoding.writeVarUint(awarenessEncoder, MESSAGE_AWARENESS);
+      encoding.writeVarUint8Array(
+        awarenessEncoder,
+        awarenessProtocol.encodeAwarenessUpdate(doc.awareness, Array.from(awarenessStates.keys()))
+      );
+      conn.send(encoding.toUint8Array(awarenessEncoder));
+    }
+  }).catch((err) => {
+    console.error(`Failed to setup connection for ${docName}:`, err);
+    conn.close();
+  });
 }

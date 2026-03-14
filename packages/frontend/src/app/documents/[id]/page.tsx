@@ -186,7 +186,7 @@ export default function DocumentPage() {
         )}
         {showVersions && (
           <div style={{ width: '320px', flexShrink: 0 }}>
-            <VersionHistoryPanel documentId={params.id} />
+            <VersionHistoryPanel documentId={params.id} provider={provider} />
           </div>
         )}
       </div>

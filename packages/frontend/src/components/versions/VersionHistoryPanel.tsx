@@ -2,13 +2,15 @@
 
 import { useEffect, useState } from 'react';
 import { versions as versionsApi } from '@/lib/api';
+import type { WebsocketProvider } from 'y-websocket';
 import type { DocumentVersion } from '@collab-editor/shared';
 
 interface VersionHistoryPanelProps {
   documentId: string;
+  provider?: WebsocketProvider | null;
 }
 
-export function VersionHistoryPanel({ documentId }: VersionHistoryPanelProps) {
+export function VersionHistoryPanel({ documentId, provider }: VersionHistoryPanelProps) {
   const [versionsList, setVersionsList] = useState<DocumentVersion[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -45,7 +47,22 @@ export function VersionHistoryPanel({ documentId }: VersionHistoryPanelProps) {
     if (!confirm('Restore this version? Current content will be replaced.')) return;
     setRestoring(versionId);
     try {
+      // Disconnect the WebSocket provider to stop syncing local changes
+      if (provider) {
+        provider.disconnect();
+      }
+      // Call restore (which flushes collab server, then updates DB)
       await versionsApi.restore(documentId, versionId);
+      // Clear the local IndexedDB cache so the restored state loads cleanly
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const req = indexedDB.deleteDatabase(documentId);
+          req.onsuccess = () => resolve();
+          req.onerror = () => reject(req.error);
+        });
+      } catch {
+        // IndexedDB may not exist yet
+      }
       // Reload the page to get the restored content via Yjs sync
       window.location.reload();
     } catch (err) {

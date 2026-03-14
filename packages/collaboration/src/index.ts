@@ -2,7 +2,7 @@ import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
 import dotenv from 'dotenv';
-import { setupWSConnection } from './ws-utils';
+import { setupWSConnection, evictDoc, persistDoc } from './ws-utils';
 import { PostgresPersistence } from './persistence';
 import { verifyToken } from './auth';
 
@@ -18,7 +18,25 @@ if (DATABASE_URL) {
   console.log('PostgreSQL persistence enabled');
 }
 
-const server = http.createServer((_req, res) => {
+const server = http.createServer(async (req, res) => {
+  // POST /persist/:docId — flush in-memory state to DB
+  if (req.method === 'POST' && req.url?.startsWith('/persist/') && persistence) {
+    const docId = req.url.slice('/persist/'.length);
+    const persisted = await persistDoc(docId, persistence);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ persisted }));
+    return;
+  }
+
+  // POST /flush/:docId — evict a document from memory so it reloads from DB
+  if (req.method === 'POST' && req.url?.startsWith('/flush/')) {
+    const docId = req.url.slice('/flush/'.length);
+    const evicted = evictDoc(docId);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ evicted }));
+    return;
+  }
+
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ status: 'ok', service: 'collaboration-server' }));
 });

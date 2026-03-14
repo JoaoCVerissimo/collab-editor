@@ -3,12 +3,10 @@ import jwt from 'jsonwebtoken';
 import { config } from '../config';
 import type { AuthPayload } from '@collab-editor/shared';
 
-declare global {
-  namespace Express {
-    interface Request {
-      userId?: string;
-      userEmail?: string;
-    }
+declare module 'express-serve-static-core' {
+  interface Request {
+    userId?: string;
+    userEmail?: string;
   }
 }
 
